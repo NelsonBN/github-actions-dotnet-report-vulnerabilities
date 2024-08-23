@@ -12,6 +12,7 @@ We also will see how to report a security vulnerability to summary actions
 - [Privately reporting a security vulnerability](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
 
 
+- [Demo PR](https://github.com/NelsonBN/github-actions-dotnet-report-vulnerabilities/pull/1)
 
 
 ![PR](./media/pr.png)
