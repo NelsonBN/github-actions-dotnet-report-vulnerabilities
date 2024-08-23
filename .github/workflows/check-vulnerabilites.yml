@@ -1,0 +1,170 @@
+name: 'Vulnerability Report'
+
+
+on:
+  workflow_dispatch: # To can dispatch manually
+
+  # Schedule to run every week on Sunday at 00:00 UTC
+  schedule:
+    - cron: '0 0 * * 0'
+
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+    branches:
+      - main
+
+  push:
+    branches:
+      - main
+
+
+env:
+  SDK_VERSION: '8.x.x'
+
+
+jobs:
+
+  check-vulnerabilities:
+    name: "Check vulnerabilities"
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: "Checkout"
+      uses: actions/checkout@v4
+
+    - name: "Setup .NET"
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.SDK_VERSION }}
+
+    - name: "Restore dependencies"
+      run: dotnet restore
+
+    - name: "Analyze Vulnerable Packages"
+      id: analyze
+      run: dotnet list package --vulnerable --include-transitive 2>&1 | tee vulnerability-report.log
+
+    - name: "Show Vulnerability Report"
+      run: |
+        echo "Vulnerability Report:"
+        cat vulnerability-report.log
+
+    - name: "Upload Log Report"
+      uses: actions/upload-artifact@v4
+      with:
+        name: log-report
+        path: vulnerability-report.log
+
+    - name: "Generate Markdown Report"
+      run: |
+        echo "# Vulnerability Report" > vulnerability-report.md
+        echo "" >> vulnerability-report.md
+        echo "Generated on $(date)" >> vulnerability-report.md
+        echo "" >> vulnerability-report.md
+        echo '```' >> vulnerability-report.md
+        cat vulnerability-report.log >> vulnerability-report.md
+        echo '```' >> vulnerability-report.md
+
+    - name: "Publish report"
+      run: cat vulnerability-report.md > $GITHUB_STEP_SUMMARY
+
+    - name: "Add Coverage PR Comment"
+      uses: marocchino/sticky-pull-request-comment@v2
+      if: github.event_name == 'pull_request'
+      with:
+        recreate: true
+        path: vulnerability-report.md
+
+    - name: "Upload Markdown Report"
+      uses: actions/upload-artifact@v4
+      with:
+        name: markdown-report
+        path: vulnerability-report.md
+
+    - name: "Convert Log to SARIF"
+      shell: pwsh
+      run: |
+        $report = Get-Content 'vulnerability-report.log'
+        $sarifReport = @{
+          version = '2.1.0'
+          runs = @(@{
+            tool = @{
+              driver = @{
+                name = 'dotnet list package'
+                version = '5.0'
+              }
+            }
+            results = @()
+          })
+        }
+
+        foreach ($line in $report) {
+
+          if ($line -match 'Project\s+`([^`]+)`') {
+            $projectName = $matches[1]
+            $csprojPath = Get-ChildItem -Recurse -Filter "$projectName.csproj" | Select-Object -First 1
+            if ($null -eq $csprojPath) {
+              Write-Error "The project file '$projectName.csproj' was not found."
+              exit 1
+            }
+          }
+
+          if ($line -match '(\S+)\s+(\S+)\s+(\S+)\s+(Critical|High|Moderate|Low)\s+(\S+)') {
+            $packageName = $matches[1]
+            $requestedVersion = $matches[2]
+            $resolvedVersion = $matches[3]
+            $severity = $matches[4]
+            $advisoryUrl = $matches[5]
+
+            $level = switch ($severity) {
+              "Critical" { "error" }
+              "High" { "error" }
+              "Moderate" { "warning" }
+              "Low" { "note" }
+              default { "none" }
+            }
+
+            $result = @{
+              ruleId = 'Vulnerability'
+              level = $level
+              message = @{
+                text = "$packageName $requestedVersion -> $resolvedVersion has a $severity vulnerability. More info: $advisoryUrl"
+              }
+              locations = @(@{
+                physicalLocation = @{
+                  artifactLocation = @{
+                    uri = $csprojPath.Name
+                  }
+                }
+              })
+            }
+
+            $sarifReport.runs[0].results += $result
+          }
+
+        }
+
+        $sarifReport | ConvertTo-Json -Depth 10 | Out-File 'vulnerability-report.sarif'
+
+    - name: "Upload SARIF to GitHub Security"
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: vulnerability-report.sarif
+        category: 'security_vulnerabilities'
+
+    - name: "Upload SARIF Report"
+      uses: actions/upload-artifact@v4
+      with:
+        name: sarif-report
+        path: vulnerability-report.sarif
+
+    - name: "Fail if vulnerabilities found"
+      run: |
+        echo "Checking for vulnerabilities..."
+        if grep -q -i "\bcritical\b\|\bhigh\b\|\bmoderate\b\|\blow\b" vulnerability-report.log; then
+          echo "Security Vulnerabilities found."
+          exit 1
+        else
+          echo "No vulnerabilities found."
+          exit 0
+        fi
